@@ -1,0 +1,302 @@
+version: "1.0"
+task_id: "t_1840027a"
+project: "essay-auto-scoring-research"
+created_at: "2026-05-27"
+mlflow_guide_section: "docs/mlflow_기반_ai_서술형_자동채점_실험추적_리포트_가이드_v_1_0.md#15"
+
+judgement_enum:
+  - PASS_FINAL
+  - PASS_CANDIDATE
+  - FAIL_RETRY_HPO
+  - FAIL_REBUILD_FEATURES
+  - FAIL_REVIEW_LABELS
+  - FAIL_CHANGE_MODEL
+  - FAIL_NEED_MORE_DATA
+  - FAIL_STOP_NO_GAIN
+
+global_hard_gates:
+  no_test_set_leakage:
+    operator: "=="
+    value: true
+    failure_judgement: FAIL_REBUILD_FEATURES
+  no_student_pii_in_model_features:
+    operator: "=="
+    value: true
+    allowed_model_pii_fields:
+      - student_grade
+    split_only_fields:
+      - student.location
+    failure_judgement: FAIL_REBUILD_FEATURES
+  mlflow_required_tags_present:
+    operator: "contains_all"
+    value:
+      - cycle_id
+      - kanban_task_id
+      - feature_provenance
+    failure_judgement: FAIL_RETRY_HPO
+  rubric_weights_externalized:
+    operator: "=="
+    value: true
+    source: "configs/rubric_weights.yaml"
+    failure_judgement: FAIL_REBUILD_FEATURES
+  feature_provenance_label_side_count:
+    operator: "=="
+    value: 0
+    failure_judgement: FAIL_REBUILD_FEATURES
+  task_metadata_artifacts_and_verification:
+    operator: "=="
+    value: true
+    failure_judgement: FAIL_RETRY_HPO
+  cost_circuit_breaker_breached:
+    operator: "=="
+    value: false
+    failure_judgement: FAIL_STOP_NO_GAIN
+
+stages:
+  toy:
+    scope:
+      dataset: "dataset/sample/"
+      max_rows: 342
+      models:
+        - M1_dummy
+        - M2_length
+        - M3_tfidf_ridge
+        - M4_lightgbm
+      forbidden:
+        - full_dataset_load
+        - transformer_training
+        - final_model_registration
+        - external_deployment
+    primary_metrics:
+      qwk:
+        operator: ">="
+        value: 0.0
+        hard_block: false
+        note: "Toy threshold is diagnostic; workflow and leakage validation are primary."
+    secondary_metrics:
+      mae:
+        operator: "<="
+        value: 3.0
+        hard_block: false
+      rmse:
+        operator: "<="
+        value: 4.0
+        hard_block: false
+      train_valid_qwk_gap_abs:
+        operator: "<="
+        value: 0.10
+        hard_block: false
+        warning: "Warn when train/valid gap exceeds 10%."
+      baseline_dummy_floor:
+        operator: "<="
+        left: "M1_qwk"
+        right_any:
+          - "M3_qwk"
+          - "M4_qwk"
+        hard_block: true
+        failure_judgement: FAIL_CHANGE_MODEL
+        note: "Toy sanity gate from AGENTS.md; M2 length ordering is excluded."
+    segment_metrics:
+      required_segments:
+        - type
+        - grade_band
+        - score_band
+      min_segment_rows_warn:
+        operator: ">="
+        value: 30
+      min_segment_qwk:
+        operator: ">="
+        value: -0.20
+        hard_block: false
+      max_score_band_bias_abs:
+        operator: "<="
+        value: 1.50
+        hard_block: false
+    ceiling_comparison:
+      metric_unit: "QWK(model_pred, 3-rater-average)"
+      human_ceiling_allowed_units:
+        - "ICC(2,k)"
+        - "mean_QWK(rater_i, 3-rater-average)"
+      bootstrap_ci_required: true
+      hard_block: false
+      warn_condition: "model_lower95 > ceiling_upper95"
+    pass_judgement: PASS_CANDIDATE
+    final_judgement_allowed: false
+
+  mid:
+    scope:
+      dataset: "human-approved mid-scale subset"
+      max_rows: null
+      models:
+        - M1_dummy
+        - M2_length
+        - M3_tfidf_ridge
+        - M4_lightgbm
+      forbidden:
+        - autonomous_full_dataset_load
+        - final_model_registration
+        - external_deployment
+    primary_metrics:
+      qwk:
+        operator: ">="
+        value: 0.20
+        hard_block: false
+    secondary_metrics:
+      mae:
+        operator: "<="
+        value: 2.50
+        hard_block: false
+      rmse:
+        operator: "<="
+        value: 3.25
+        hard_block: false
+      train_valid_qwk_gap_abs:
+        operator: "<="
+        value: 0.10
+        hard_block: true
+        failure_judgement: FAIL_CHANGE_MODEL
+      baseline_ordering:
+        operator: "ordered_non_decreasing"
+        value:
+          - M1_qwk
+          - M2_qwk
+          - M3_qwk
+          - M4_qwk
+        hard_block: false
+        warning: "Mid phase records strict ordering violations but requires human approval before hard-block escalation."
+    segment_metrics:
+      required_segments:
+        - type
+        - grade_band
+        - score_band
+      min_segment_rows_warn:
+        operator: ">="
+        value: 50
+      min_segment_qwk:
+        operator: ">="
+        value: 0.0
+        hard_block: false
+      max_score_band_bias_abs:
+        operator: "<="
+        value: 1.00
+        hard_block: false
+    ceiling_comparison:
+      metric_unit: "QWK(model_pred, 3-rater-average)"
+      bootstrap_ci_required: true
+      hard_block: false
+      warn_condition: "model_lower95 > ceiling_upper95"
+    pass_judgement: PASS_CANDIDATE
+    final_judgement_allowed: false
+
+  full:
+    scope:
+      dataset: "full dataset after human Phase-up approval"
+      max_rows: null
+      models:
+        - M1_dummy
+        - M2_length
+        - M3_tfidf_ridge
+        - M4_lightgbm
+        - human_approved_additional_models
+      forbidden:
+        - autonomous_phase_transition
+        - unapproved_transformer_training
+        - unapproved_final_model_registration
+        - external_deployment_without_human_gate
+    primary_metrics:
+      qwk:
+        operator: ">="
+        value: 0.50
+        hard_block: true
+        failure_judgement: FAIL_CHANGE_MODEL
+    secondary_metrics:
+      mae:
+        operator: "<="
+        value: 1.75
+        hard_block: true
+        failure_judgement: FAIL_CHANGE_MODEL
+      rmse:
+        operator: "<="
+        value: 2.50
+        hard_block: true
+        failure_judgement: FAIL_CHANGE_MODEL
+      train_valid_qwk_gap_abs:
+        operator: "<="
+        value: 0.10
+        hard_block: true
+        failure_judgement: FAIL_CHANGE_MODEL
+      baseline_ordering:
+        operator: "ordered_non_decreasing"
+        value:
+          - M1_qwk
+          - M2_qwk
+          - M3_qwk
+          - M4_qwk
+        hard_block: true
+        ci_required: true
+        failure_judgement: FAIL_CHANGE_MODEL
+    segment_metrics:
+      required_segments:
+        - type
+        - grade_band
+        - score_band
+      min_segment_rows_warn:
+        operator: ">="
+        value: 100
+      min_segment_qwk:
+        operator: ">="
+        value: 0.30
+        hard_block: true
+        failure_judgement: FAIL_NEED_MORE_DATA
+      max_score_band_bias_abs:
+        operator: "<="
+        value: 0.50
+        hard_block: true
+        failure_judgement: FAIL_REVIEW_LABELS
+    ceiling_comparison:
+      metric_unit: "QWK(model_pred, 3-rater-average)"
+      human_ceiling_allowed_units:
+        - "ICC(2,k)"
+        - "mean_QWK(rater_i, 3-rater-average)"
+      bootstrap_ci_required: true
+      hard_block: true
+      block_condition: "model_lower95 > ceiling_upper95"
+      failure_judgement: FAIL_REBUILD_FEATURES
+    pass_judgement: PASS_CANDIDATE
+    final_judgement_allowed: false
+
+mlflow_recording:
+  required_params:
+    - model_type
+    - model_name
+    - feature_set
+    - target_name
+    - split_version
+    - random_seed
+    - config_hash
+  required_metrics:
+    - qwk
+    - mae
+    - rmse
+    - train_valid_qwk_gap
+  required_artifacts:
+    - predictions.csv
+    - metrics.json
+    - segment_metrics.csv
+    - feature_provenance_manifest.yaml
+    - reproducibility_manifest.json
+    - decision_summary.md
+  required_tags:
+    - cycle_id
+    - kanban_task_id
+    - feature_provenance
+    - dataset_version
+    - split_version
+    - rubric_version
+
+decision_mapping:
+  hard_gate_failure: "Use the gate-specific failure_judgement."
+  toy_metric_warning_only: PASS_CANDIDATE
+  accepted_non_final_model: PASS_CANDIDATE
+  final_model_registration_requested: PASS_FINAL
+  no_gain_after_allowed_cycles: FAIL_STOP_NO_GAIN

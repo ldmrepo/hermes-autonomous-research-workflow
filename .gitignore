@@ -1,0 +1,38 @@
+# Hermes / Codex internal state
+.agents/
+.codex/
+
+# MLflow runtime (re-generatable)
+mlflow.db
+mlflow.db-journal
+mlruns/
+mlruns_legacy/
+
+# Cycle workspace outputs (re-generatable from pipelines/)
+workspace/cycle_*/
+
+# Generated reports
+reports/latest/
+reports/cycle_*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Windows ADS (WSL)
+*:Zone.Identifier

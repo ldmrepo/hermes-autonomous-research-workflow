@@ -1,0 +1,47 @@
+# Self-improving cycle board configuration
+# Source: docs/self_improving_architecture_v_1_0.md + docs/escalation_matrix_v_1_0.md
+#         + docs/research/self_improving_long_running_research_v_1_0.md
+# Applied decisions:
+#   D1. decide_timeout_policy = 3-tier 분기 (cycle 내부 Continue / DECIDE 6h grace → Pause / Phase 전환 Pause)
+#   D2. docs/research/ 폴더 신설
+#   D3. P0/P1 차용 권고 4종 즉시 반영 (cost_circuit_breaker, decide_timeout, goal_anchor는 AGENTS.md, full_trace_propagation은 T-R2 scripts)
+
+auto_cycle:
+  # Concurrency / resource limits
+  max_concurrent_cycles: 1
+  max_tasks_per_cycle: 12
+  max_cycles: 30
+  max_consecutive_failures: 3
+
+  # Human decision timeout — 3-tier policy (D1)
+  human_decision_timeout: "24h"
+  decide_timeout_policy:
+    cycle_internal: "Continue"          # cycle 내부 sub-task 사이 — 안전
+    decide_n_grace_period: "6h"         # 사용자 단기 무응답 허용
+    decide_n_after_grace: "Pause"       # grace 후엔 외부 evidence 따라 멈춤
+    phase_transition: "Pause"           # toy→mid→full DECIDE는 무조건 Pause
+
+  # Terminal conditions — 4종 (자동 종료 조건)
+  terminal_conditions:
+    - acceptance_pass                   # ACCEPTANCE_CRITERIA.yaml 충족
+    - max_cycles_reached
+    - explicit_stop_decided
+    - max_consecutive_failures_reached
+
+  # Cost circuit breaker (외부 리서치 P0 권고)
+  # AI 에이전트는 crash 안 하고 spend한다 (sanj.dev). hard cap 필수.
+  cost_circuit_breaker:
+    max_tokens_per_cycle: 500000
+    max_token_velocity_per_min: 10000
+    max_usd_per_cycle: 20.0
+    on_breach: "pause_and_notify"       # halt cycle + human alert task auto-create
+
+  # DECIDE task template reference
+  decide_task_template: "docs/self_improving_architecture_v_1_0.md#decide-n-task-pattern"
+
+  # Goal anchor refresh (외부 리서치 P1 권고)
+  # 매 cycle 첫 sub-task(AUDIT)에 원본 milestone goal verbatim 재주입
+  goal_anchor:
+    enabled: true
+    inject_into_first_subtask: true
+    source: "MILESTONE.md"              # 인간이 작성, cycle 시작 시 read-only inject

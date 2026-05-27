@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "created_at": "2026-05-27",
+  "source_cycle": 3,
+  "acceptance_source": "workspace/cycle_3/final/cycle_3_report.md",
+  "skills": [
+    {
+      "id": "leakage_free_text_feature_provenance",
+      "category": "feature_engineering",
+      "path": "skills/feature_engineering/leakage_free_text_feature_provenance.md",
+      "source_artifacts": [
+        "workspace/cycle_3/features/feature_provenance_manifest.json",
+        "workspace/cycle_3/review/feature_provenance_audit.md"
+      ],
+      "acceptance_evidence": "label_side_feature_count=0"
+    },
+    {
+      "id": "location_group_split_reverification",
+      "category": "splitting",
+      "path": "skills/splitting/location_group_split_reverification.md",
+      "source_artifacts": [
+        "workspace/cycle_3/splits/split_manifest.yaml",
+        "workspace/cycle_3/review/leakage_reverification.md"
+      ],
+      "acceptance_evidence": "zero student.location train/valid overlap across all folds"
+    },
+    {
+      "id": "metric_compatible_human_ceiling",
+      "category": "evaluation",
+      "path": "skills/evaluation/metric_compatible_human_ceiling.md",
+      "source_artifacts": [
+        "workspace/cycle_3/eval/ceiling_comparison.md",
+        "workspace/cycle_3/eval/eval_manifest.json"
+      ],
+      "acceptance_evidence": "compatible ceiling metric with bootstrap CI"
+    },
+    {
+      "id": "mlflow_required_tag_audit",
+      "category": "review",
+      "path": "skills/review/mlflow_required_tag_audit.md",
+      "source_artifacts": [
+        "workspace/cycle_3/review/mlflow_tag_audit.md",
+        "workspace/cycle_3/review/review_manifest.json"
+      ],
+      "acceptance_evidence": "20 MLflow runs checked with zero missing required tags"
+    }
+  ]
+}
