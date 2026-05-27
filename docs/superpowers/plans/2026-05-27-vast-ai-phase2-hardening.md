@@ -1060,7 +1060,7 @@ cd /home/dev/work/essay-auto-scoring-research && \
 |---|---|---|
 | GPU 공급자 | vast.ai | 시간당 단가 최저 (~$0.05/hr RTX 3060), API/CLI 단순, 한국 인근 region 가용 |
 | 진입 모델 | klue/roberta-small (68M) | 8GB VRAM로 충분, 5K + HPO 30 trial 1~1.5h |
-| 첫 cycle 예산 | < $0.30 | RTX 3060 8GB × 2h max, board_config $50/cycle cap 내 |
+| 첫 cycle 예산 | < $0.30 | RTX 3060 8GB × 2h max, board_config $20/cycle cap 내 (대형 모델 시 $50 상향 검토) |
 | 데이터 전송 보호 | `pipelines.audit_pii --fail-on-hit` gate | Hard Rule #2 정신(외부 compute로 PII 송신 금지) |
 | Auto-destroy | shell `trap ... EXIT` 패턴 | 누락 시 과금 누적 → 운영 위험 #1 |
 
