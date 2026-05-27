@@ -1,0 +1,24 @@
+{
+  "paragraph": [
+    {
+      "paragraph_txt": "미래에는 엄청난 일들이 벌어질 것 같다. 예를 들어 과학기술이 발달되어 사람 대신 로봇이 일을 할 것 같다.",
+      "paragraph_len": 60,
+      "paragraph_id": "001"
+    }
+  ],
+  "score": {"essay_scoreT_avg": 24.78},
+  "student": {
+    "date": "2021.09.16",
+    "student_grade": "중등_1학년",
+    "location": "033",
+    "student_grade_group": "중등",
+    "student_reading": 1
+  },
+  "info": {
+    "essay_id": "ESSAY_33474",
+    "essay_prompt": "미래의 도시는 어떤 모습일까요?",
+    "essay_type": "글짓기",
+    "essay_len": 60,
+    "essay_main_subject": "미래 도시에 대한 본인의 생각"
+  }
+}

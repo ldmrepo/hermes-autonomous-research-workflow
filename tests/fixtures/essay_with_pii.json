@@ -1,0 +1,24 @@
+{
+  "paragraph": [
+    {
+      "paragraph_txt": "안녕하세요 저는 김민수입니다. 다니고 있는 학교는 서울대학교사범대학부설초등학교이고, 6학년입니다. 연락처는 010-1234-5678 이고 이메일은 minsoo@example.com 입니다.",
+      "paragraph_len": 105,
+      "paragraph_id": "001"
+    }
+  ],
+  "score": {"essay_scoreT_avg": 18.0},
+  "student": {
+    "date": "2022.03.01",
+    "student_grade": "초등_6학년",
+    "location": "011",
+    "student_grade_group": "초등",
+    "student_reading": 2
+  },
+  "info": {
+    "essay_id": "ESSAY_99999",
+    "essay_prompt": "내 소개를 해주세요.",
+    "essay_type": "글짓기",
+    "essay_len": 105,
+    "essay_main_subject": "자기소개"
+  }
+}
