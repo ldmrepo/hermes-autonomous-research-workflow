@@ -75,6 +75,26 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
             "verbosity": -1,
         },
     },
+    "M5": {
+        "model_name": "klue_roberta_regression",
+        "model_type": "KLUE-RoBERTa",
+        "feature_set": "raw_text",
+        "assumption": "Pretrained transformer captures semantic + lexical signal far beyond TF-IDF.",
+        "default_hparams": {
+            "learning_rate": 2e-5,
+            "per_device_train_batch_size": 16,
+            "num_train_epochs": 3,
+            "weight_decay": 0.01,
+            "warmup_ratio": 0.06,
+        },
+    },
+    "M6": {
+        "model_name": "m4_m5_stacking",
+        "model_type": "RidgeStackingEnsemble",
+        "feature_set": "stacked_predictions",
+        "assumption": "Linear stacking of M4 (LightGBM) + M5 (RoBERTa) reduces individual errors when uncorrelated.",
+        "depends_on": ["M4", "M5"],
+    },
 }
 
 
@@ -87,9 +107,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="workspace/cycle_1/models")
     parser.add_argument("--mlflow-uri", default="sqlite:///mlflow.db")
     parser.add_argument("--experiment-name", default="cycle_1")
-    parser.add_argument("--cycle-id", type=int, default=1)
+    parser.add_argument("--cycle-id", default="1", help="Cycle id, e.g. '1' (Phase 1) or 'M1' (Phase 2).")
     parser.add_argument("--kanban-task-id", default="t_fe88cfdb")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="HuggingFace model id for M5 (e.g. klue/roberta-small). Required for M5.",
+    )
+    parser.add_argument(
+        "--hpo-trials",
+        type=int,
+        default=0,
+        help="Optuna HPO trials count (0 = no HPO, use defaults).",
+    )
     parser.add_argument(
         "--models",
         nargs="+",
