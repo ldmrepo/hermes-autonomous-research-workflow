@@ -271,11 +271,24 @@ class TestDetectPii:
         hits = detect_pii(text)
         assert any(h["type"] == "person_name" and h["match"] == "김민수" for h in hits)
 
-    def test_does_not_flag_three_char_common_noun(self):
+    def test_does_not_flag_common_noun_without_trigger(self):
         # 한국어 일반명사는 흔한 한자어 어휘로 false positive 위험 — 이름 패턴은 보수적으로
         text = "환경오염, 바이러스, 사회문제"
         hits = [h for h in detect_pii(text) if h["type"] == "person_name"]
         assert hits == [], f"unexpected name match: {hits}"
+
+    def test_does_not_flag_common_occupation_noun_after_trigger(self):
+        # 흔한 K-12 self-intro 패턴: "저는 [직업/역할]입니다" — name이 아니라 일반명사.
+        # COMMON_NOUNS_AFTER_TRIGGER 가드가 동작해야 함.
+        for text in ("저는 학생입니다.", "저는 교사이고", "저는 어머니입니다."):
+            hits = [h for h in detect_pii(text) if h["type"] == "person_name"]
+            assert hits == [], f"false positive on {text!r}: {hits}"
+
+    def test_does_not_overmatch_phone_in_long_digit_string(self):
+        # 단어 경계 가드: 11자리 휴대전화 패턴이 더 긴 숫자열에 embedded 시 매치 금지.
+        text = "주문번호 0101234567812345"
+        hits = [h for h in detect_pii(text) if h["type"] == "phone"]
+        assert hits == [], f"phone over-match: {hits}"
 ```
 
 - [ ] **Step 3: 테스트 실행 → FAIL 확인**
@@ -314,7 +327,7 @@ class PiiHit(TypedDict):
 
 
 # Korean mobile phone: 010-XXXX-XXXX (optional spaces/dots/dashes)
-_PHONE_RE = re.compile(r"01[016789][\s.\-]?\d{3,4}[\s.\-]?\d{4}")
+_PHONE_RE = re.compile(r"(?<!\d)01[016789][\s.\-]?\d{3,4}[\s.\-]?\d{4}(?!\d)")
 
 # Email (RFC-light)
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
@@ -329,6 +342,19 @@ _NAME_RE = re.compile(
     r"(?:저는|이름은|제\s*이름은)\s+([가-힣]{2,3})(?=입니다|이고|이며|이에요|이라|\s|$|[.,])"
 )
 
+# Common occupation/role/relation nouns that appear after trigger phrases in K-12 essays.
+# Matches here are NOT person names — post-filter these in detect_pii to reduce false positives.
+_COMMON_NOUNS_AFTER_TRIGGER = frozenset({
+    # Occupations / roles
+    "학생", "선생", "교사", "의사", "간호사", "기자", "군인", "농부", "배우",
+    "가수", "작가", "선수", "감독", "회사원", "공무원", "사장", "직원", "사람",
+    # Family / relations
+    "엄마", "아빠", "아버지", "어머니", "형", "누나", "오빠", "언니", "동생",
+    "남동생", "여동생", "아들", "딸", "친구", "남편", "아내",
+    # Generic identifiers
+    "어른", "어린이", "청소년", "초등학생", "중학생", "고등학생", "대학생",
+})
+
 
 def detect_pii(text: str) -> List[PiiHit]:
     """Scan text for PII patterns. Returns list of hits (empty if clean)."""
@@ -342,8 +368,9 @@ def detect_pii(text: str) -> List[PiiHit]:
     for m in _NAME_RE.finditer(text):
         # Captured group 1 is the bare name (without the trigger phrase)
         name = m.group(1)
-        name_start = m.start(1)
-        hits.append({"type": "person_name", "match": name, "start": name_start, "end": name_start + len(name)})
+        if name in _COMMON_NOUNS_AFTER_TRIGGER:
+            continue  # filter common nouns to reduce false positives in K-12 essays
+        hits.append({"type": "person_name", "match": name, "start": m.start(1), "end": m.end(1)})
     return hits
 ```
 
