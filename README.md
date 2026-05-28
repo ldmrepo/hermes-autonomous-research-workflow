@@ -1,4 +1,4 @@
-# Essay Auto-Scoring Research
+# Hermes Autonomous Research Workflow
 
 <p>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white">
@@ -16,9 +16,56 @@
 
 ![alt text](assets/cover.png)
 
-한국어 K-12 서술형 에세이 자동채점 연구를 Hermes Multi-Agent Kanban Board로 장기 자율 실행하는 검증 프로젝트입니다.
+Hermes Multi-Agent Kanban Board가 장시간 연구 작업을 추적 가능하고 자가 복구 가능한 방식으로 자율 실행할 수 있는지 검증하는 연구 프로젝트입니다.
 
-현재 기준은 **Phase 3 Mid Multi-task**입니다. Phase 1 toy 검증과 Phase 2 scalar 모델 검증은 종료됐고, 지금은 5,003건 표본에서 3개 rubric head + overall head를 함께 학습하는 multi-task KLUE-RoBERTa/HPO/ensemble workflow를 검증합니다.
+검증 사례로는 **한국어 K-12 서술형 에세이 자동채점**을 사용합니다. 이 저장소의 1차 목적은 채점 모델 제품화가 아니라, 실제 ML 연구 과제를 통해 Hermes 기반 장기 자율 연구 workflow의 안정성, 추적성, 품질 개선 가능성을 확인하는 것입니다.
+
+## What This Project Validates
+
+이 프로젝트는 단일 모델 성능 실험이 아니라, 연구 workflow 자체를 검증합니다.
+
+| 검증 대상 | 설명 |
+|---|---|
+| Long-running execution | Hermes worker가 여러 시간 이상 이어지는 연구 chain을 지속 실행할 수 있는지 확인 |
+| Kanban-native dependency | AUDIT, SPLIT, FEATURE, MODEL, HPO, EVAL, REVIEW, SYNTH, DECIDE 단계를 보드 의존성으로 연결 |
+| Traceability | task body, 산출물 경로, MLflow run, Optuna study, commit evidence를 연결 |
+| Self-recovery | split 실패, 환경 제약, 장시간 작업 중단 같은 문제를 worker가 evidence를 남기며 복구 |
+| Human gate | DECIDE task에서 `[Continue]`, `[Phase-up]`, `[Stop]`으로 cycle 진행을 명시적으로 통제 |
+| Quality evolution | baseline에서 Transformer/HPO/ensemble로 이어지는 모델 개선이 실제로 발생하는지 검증 |
+
+## Case Study
+
+한국어 K-12 서술형 에세이 자동채점 연구는 Hermes workflow를 검증하기 위한 현실적인 ML benchmark입니다.
+
+| 항목 | 내용 |
+|---|---|
+| Domain | 한국어 K-12 서술형 에세이 자동채점 |
+| Data | AI Hub Training 기반 5,003건 stratified sample |
+| Task | rubric별 점수와 overall 점수를 함께 예측하는 multi-task regression |
+| Models | M1 dummy, M2 length, M3 TF-IDF+Ridge, M4 LightGBM, M5 KLUE-RoBERTa, M6 ensemble |
+| Optimization | Optuna Hyperparameter Optimization |
+| Tracking | MLflow + SQLite |
+| Evaluation | QWK, RMSE, MAE, rubric별 metric, score-band fairness |
+
+## Workflow Overview
+
+```mermaid
+flowchart LR
+    AUDIT[Data Audit] --> SPLIT[Split]
+    SPLIT --> FEATURE[Feature Engineering]
+    FEATURE --> MODEL[Model Training]
+    MODEL --> HPO[Hyperparameter Optimization]
+    HPO --> EVAL[Evaluation]
+    HPO --> REVIEW[Review]
+    EVAL --> SYNTH[Synthesis]
+    REVIEW --> SYNTH
+    SYNTH --> DECIDE[Human DECIDE]
+    DECIDE -->|Continue| AUDIT
+    DECIDE -->|Phase-up| PHASE[Next Phase Gate]
+    DECIDE -->|Stop| STOP[Stop]
+```
+
+각 단계는 Hermes Kanban task로 등록되고, parent dependency를 통해 다음 단계가 자동으로 ready 상태가 됩니다. 장시간 작업은 worker foreground가 아니라 외부 실행 + progress polling 방식으로 추적합니다.
 
 ## Current State
 
@@ -32,7 +79,7 @@
 | Tracking | `sqlite:///mlflow.db`, `sqlite:///optuna.db` |
 | Human gate | `DECIDE-*`에서 `[Continue]`, `[Phase-up]`, `[Stop]` |
 
-현재 source of truth:
+Source of truth:
 
 - Project rules: `AGENTS.md`
 - Phase goal: `MILESTONE_v3.md`
@@ -165,7 +212,7 @@ vastai --api-key "$VAST_API_KEY" search offers 'gpu_ram>=8 reliability>0.95' --r
 └── optuna.db         # ignored runtime DB
 ```
 
-## Profiles
+## Hermes Agent Profiles
 
 | Profile | 책임 |
 |---|---|
@@ -176,9 +223,19 @@ vastai --api-key "$VAST_API_KEY" search offers 'gpu_ram>=8 reliability>0.95' --r
 | `turing` | REVIEW |
 | `ada-lovelace` | 구현 보조 |
 
-## Archive
+## Governance
 
-완료된 Phase 1/2 문서, 발표 자료, 리뷰 체크리스트, 구버전 스펙은 `docs/archive/` 아래로 이동했습니다. 운영 기준은 루트 문서와 `docs/README.md`의 active 문서 목록을 따릅니다.
+운영 기준은 루트 문서와 `docs/README.md`의 active 문서 목록을 따릅니다.
+
+| 문서 | 역할 |
+|---|---|
+| `AGENTS.md` | Hermes worker 행동 규칙과 hard rules |
+| `ACCEPTANCE_CRITERIA.yaml` | phase별 acceptance gate |
+| `MILESTONE_v3.md` | Phase 3 목표와 성공 기준 |
+| `docs/phase_3_operations_guide_v_1_0.md` | 운영 절차 |
+| `docs/multi_task_채점모델_구현_스펙_v_1_1.md` | multi-task 모델 구현 스펙 |
+
+완료된 Phase 1/2 문서, 발표 자료, 리뷰 체크리스트, 구버전 스펙은 `docs/archive/` 아래에 보관합니다.
 
 ## License
 
