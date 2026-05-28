@@ -37,6 +37,21 @@ TARGET_NAME = "essay_scoreT_avg"
 SCORE_MIN = 0
 SCORE_MAX = 30
 SENTENCE_SEPARATOR = "#@문장구분#"
+PHASE3_TARGET_COLUMNS = (
+    "target_exp",
+    "target_org",
+    "target_cont",
+    "target_overall_norm",
+)
+PHASE3_WEIGHT_COLUMNS = ("w_exp", "w_org", "w_cont", "w_overall")
+PHASE3_OUTPUT_NAMES = ("exp", "org", "cont", "overall_norm")
+PHASE3_PREDICTION_COLUMNS = (
+    "prediction_exp",
+    "prediction_org",
+    "prediction_cont",
+    "prediction_overall_norm",
+)
+PHASE3_LOSS_FORMULA = "((preds - labels) ** 2 * macro_weights).sum(dim=1).mean()"
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "M1": {
         "model_name": "dummy_mean",
@@ -78,10 +93,10 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
         },
     },
     "M5": {
-        "model_name": "klue_roberta_regression",
+        "model_name": "klue_roberta_multitask",
         "model_type": "KLUE-RoBERTa",
         "feature_set": "raw_text",
-        "assumption": "Pretrained transformer captures semantic + lexical signal far beyond TF-IDF.",
+        "assumption": "Pretrained transformer predicts exp/org/cont/overall_norm jointly from model-visible essay text.",
         "default_hparams": {
             "learning_rate": 2e-5,
             "per_device_train_batch_size": 16,
@@ -110,6 +125,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mlflow-uri", default="sqlite:///mlflow.db")
     parser.add_argument("--experiment-name", default="cycle_1")
     parser.add_argument("--cycle-id", default="1", help="Cycle id, e.g. '1' (Phase 1) or 'M1' (Phase 2).")
+    parser.add_argument(
+        "--phase",
+        default="auto",
+        help="Training phase. 'auto' treats feature dirs with Phase 3 target artifacts as phase 3.",
+    )
     parser.add_argument("--kanban-task-id", default="t_fe88cfdb")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -141,6 +161,11 @@ def parse_args() -> argparse.Namespace:
         default=["M1", "M2", "M3", "M4"],
         help="Subset of model IDs to train. Accepts space-separated or comma-separated IDs.",
     )
+    parser.add_argument(
+        "--progress-json",
+        default=None,
+        help="Optional progress.json path for off-worker M5/M6 runs.",
+    )
     return parser.parse_args()
 
 
@@ -171,6 +196,20 @@ def normalize_model_ids(model_args: list[str]) -> list[str]:
     if not model_ids:
         raise ValueError("at least one model id is required")
     return model_ids
+
+
+def resolve_phase(args: argparse.Namespace) -> str:
+    phase = str(getattr(args, "phase", "auto")).strip().lower()
+    if phase != "auto":
+        return phase.replace("phase", "").replace("_", "") or phase
+    feature_dir = Path(getattr(args, "feature_dir", ""))
+    if (feature_dir / "phase3_transformer_input_manifest.json").exists():
+        return "3"
+    return "2"
+
+
+def is_phase3_args(args: argparse.Namespace) -> bool:
+    return resolve_phase(args) == "3"
 
 
 def sha256_file(path: Path) -> str:
@@ -366,6 +405,82 @@ def load_fold_data(
     return matrix, labels, row_manifest
 
 
+def load_phase3_transformer_fold(
+    fold: int, feature_dir: Path, label_dir: Path
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Load fold rows plus Phase 3 `(N,4)` targets and macro weights for M5."""
+    _, labels, _ = load_fold_data(fold=fold, feature_dir=feature_dir, label_dir=label_dir)
+    target_path = feature_dir / f"fold_{fold}_phase3_targets.npz"
+    row_path = feature_dir / f"fold_{fold}_phase3_transformer_rows.json"
+    if not target_path.exists():
+        raise FileNotFoundError(
+            f"{target_path} missing; Phase 3 M5 cannot fall back to scalar {TARGET_NAME}."
+        )
+    if not row_path.exists():
+        raise FileNotFoundError(
+            f"{row_path} missing; Phase 3 M5 requires transformer row manifest."
+        )
+
+    arrays = np.load(target_path, allow_pickle=False)
+    target_labels = arrays["labels"].astype(np.float32)
+    macro_weights = arrays["macro_weights"].astype(np.float32)
+    target_overall_raw = arrays["target_overall_raw"].astype(np.float32)
+    label_columns = tuple(str(value) for value in arrays["label_columns"].tolist())
+    weight_columns = tuple(str(value) for value in arrays["macro_weight_columns"].tolist())
+    if label_columns != PHASE3_TARGET_COLUMNS:
+        raise ValueError(
+            f"{target_path} label_columns={label_columns}, expected {PHASE3_TARGET_COLUMNS}"
+        )
+    if weight_columns != PHASE3_WEIGHT_COLUMNS:
+        raise ValueError(
+            f"{target_path} macro_weight_columns={weight_columns}, expected {PHASE3_WEIGHT_COLUMNS}"
+        )
+    expected_shape = (len(labels), len(PHASE3_TARGET_COLUMNS))
+    if target_labels.shape != expected_shape:
+        raise ValueError(f"{target_path} labels shape {target_labels.shape}, expected {expected_shape}")
+    if macro_weights.shape != expected_shape:
+        raise ValueError(
+            f"{target_path} macro_weights shape {macro_weights.shape}, expected {expected_shape}"
+        )
+    if target_overall_raw.shape != (len(labels),):
+        raise ValueError(
+            f"{target_path} target_overall_raw shape {target_overall_raw.shape}, "
+            f"expected {(len(labels),)}"
+        )
+
+    row_manifest = load_json(row_path)
+    rows = row_manifest.get("rows", [])
+    if len(rows) != len(labels):
+        raise ValueError(f"{row_path} row count {len(rows)} != labels row count {len(labels)}")
+    for idx, (manifest_row, label_row) in enumerate(zip(rows, labels.itertuples(index=False))):
+        if int(manifest_row["row_index"]) != idx:
+            raise ValueError(f"{row_path} row_index mismatch at {idx}")
+        for field in ("partition", "essay_id", "relative_path"):
+            if manifest_row[field] != getattr(label_row, field):
+                raise ValueError(
+                    f"{row_path} {field} mismatch at row {idx}: "
+                    f"{manifest_row[field]} != {getattr(label_row, field)}"
+                )
+
+    out = labels.copy()
+    for idx, column in enumerate(PHASE3_TARGET_COLUMNS):
+        out[column] = target_labels[:, idx]
+    for idx, column in enumerate(PHASE3_WEIGHT_COLUMNS):
+        out[column] = macro_weights[:, idx]
+    out["target_overall_raw"] = target_overall_raw
+    out["text"] = [
+        load_model_text(label_dir, row.relative_path, row.essay_id)
+        for row in out.itertuples(index=False)
+    ]
+    return out, {
+        "target_artifact_path": str(target_path),
+        "target_row_manifest_path": str(row_path),
+        "label_columns": list(label_columns),
+        "macro_weight_columns": list(weight_columns),
+        "loss_formula": PHASE3_LOSS_FORMULA,
+    }
+
+
 def select_features(
     model_id: str, matrix: sparse.csr_matrix, row_manifest: dict[str, Any]
 ) -> sparse.csr_matrix | None:
@@ -452,6 +567,7 @@ def mlflow_log_common(
         mlflow.set_tags(
             {
                 "cycle_id": str(args.cycle_id),
+                "phase": resolve_phase(args),
                 "kanban_task_id": args.kanban_task_id,
                 "feature_provenance": feature_provenance_hash,
                 "dataset_version": str(Path(args.label_dir).parent),
@@ -489,6 +605,27 @@ def mlflow_log_common(
         for artifact_path in artifact_paths:
             mlflow.log_artifact(str(artifact_path), artifact_path=f"{model_id}/fold_{fold}")
         return run.info.run_id
+
+
+def make_progress_writer(
+    args: argparse.Namespace, model_id: str, total_steps: int
+) -> Any | None:
+    progress_path = getattr(args, "progress_json", None)
+    if not progress_path:
+        return None
+    from scripts.write_progress import ProgressWriter
+
+    return ProgressWriter(
+        progress_path,
+        task_id=args.kanban_task_id,
+        model_id=model_id,
+        total_steps=total_steps,
+    )
+
+
+def progress_update(progress: Any | None, **kwargs: Any) -> None:
+    if progress is not None:
+        progress.update(force=True, **kwargs)
 
 
 def train_model(
@@ -694,6 +831,8 @@ def train_transformer_model(
 
     from pipelines.train_transformer import train_transformer
 
+    phase = resolve_phase(args)
+    phase3 = phase == "3"
     model_dir = output_dir / model_id
     model_dir.mkdir(parents=True, exist_ok=True)
     per_fold_metrics: list[dict[str, Any]] = []
@@ -703,62 +842,106 @@ def train_transformer_model(
     override = load_hparams_override(getattr(args, "hparams_json", None))
     if override:
         hparams.update(override)
+    progress = make_progress_writer(args, model_id, total_steps=len(folds))
+    try:
+        for fold_index, fold in enumerate(folds):
+            phase3_artifacts: dict[str, Any] | None = None
+            if phase3:
+                labels, phase3_artifacts = load_phase3_transformer_fold(
+                    fold=fold, feature_dir=Path(args.feature_dir), label_dir=Path(args.label_dir)
+                )
+                train_mask = labels["partition"] == "train"
+                valid_mask = labels["partition"] == "valid"
+                train_df = labels.loc[
+                    train_mask, ["text", *PHASE3_TARGET_COLUMNS, *PHASE3_WEIGHT_COLUMNS]
+                ].copy()
+                valid_df = labels.loc[
+                    valid_mask, ["text", *PHASE3_TARGET_COLUMNS, *PHASE3_WEIGHT_COLUMNS]
+                ].copy()
+                y_train = labels.loc[train_mask, "target_overall_raw"].to_numpy(dtype=float)
+                y_valid = labels.loc[valid_mask, "target_overall_raw"].to_numpy(dtype=float)
+            else:
+                _, labels, _ = load_fold_data(
+                    fold=fold, feature_dir=Path(args.feature_dir), label_dir=Path(args.label_dir)
+                )
+                labels["text"] = [
+                    load_model_text(Path(args.label_dir), row.relative_path, row.essay_id)
+                    for row in labels.itertuples(index=False)
+                ]
+                train_mask = labels["partition"] == "train"
+                valid_mask = labels["partition"] == "valid"
+                train_df = labels.loc[train_mask, ["text", TARGET_NAME]].rename(
+                    columns={TARGET_NAME: "score"}
+                )
+                valid_df = labels.loc[valid_mask, ["text", TARGET_NAME]].rename(
+                    columns={TARGET_NAME: "score"}
+                )
+                y_train = train_df["score"].to_numpy(dtype=float)
+                y_valid = valid_df["score"].to_numpy(dtype=float)
 
-    for fold in folds:
-        _, labels, _ = load_fold_data(
-            fold=fold, feature_dir=Path(args.feature_dir), label_dir=Path(args.label_dir)
-        )
-        labels["text"] = [
-            load_model_text(Path(args.label_dir), row.relative_path, row.essay_id)
-            for row in labels.itertuples(index=False)
-        ]
+            fold_output_dir = model_dir / f"fold_{fold}_trainer"
+            progress_update(
+                progress,
+                current_step=f"fold_{fold}_train_start",
+                current_step_idx=fold_index,
+                last_checkpoint_path=str(fold_output_dir),
+            )
+            start = time.perf_counter()
+            transformer_result = train_transformer(
+                train_df=train_df,
+                valid_df=valid_df,
+                hparams=hparams,
+                output_dir=str(fold_output_dir),
+                text_col="text",
+                label_col="score",
+                label_cols=PHASE3_TARGET_COLUMNS if phase3 else None,
+                macro_weight_cols=PHASE3_WEIGHT_COLUMNS if phase3 else None,
+                phase=phase if phase3 else None,
+                model_name=args.model,
+                tokenizer_name=args.model,
+                max_length=256,
+                seed=args.seed,
+            )
+            train_time_seconds = float(time.perf_counter() - start)
+            train_pred = np.asarray(transformer_result["train_predictions"], dtype=float)
+            valid_pred = np.asarray(transformer_result["valid_predictions"], dtype=float)
 
-        train_mask = labels["partition"] == "train"
-        valid_mask = labels["partition"] == "valid"
-        train_df = labels.loc[train_mask, ["text", TARGET_NAME]].rename(
-            columns={TARGET_NAME: "score"}
-        )
-        valid_df = labels.loc[valid_mask, ["text", TARGET_NAME]].rename(
-            columns={TARGET_NAME: "score"}
-        )
-        y_train = train_df["score"].to_numpy(dtype=float)
-        y_valid = valid_df["score"].to_numpy(dtype=float)
+            if phase3:
+                train_pred = train_pred.reshape((-1, len(PHASE3_TARGET_COLUMNS)))
+                valid_pred = valid_pred.reshape((-1, len(PHASE3_TARGET_COLUMNS)))
+                train_overall_pred = np.clip(train_pred[:, 3] * 10.0, SCORE_MIN, SCORE_MAX)
+                valid_overall_pred = np.clip(valid_pred[:, 3] * 10.0, SCORE_MIN, SCORE_MAX)
+                train_metrics = regression_metrics(y_train, train_overall_pred)
+                valid_metrics = regression_metrics(y_valid, valid_overall_pred)
+            else:
+                train_metrics = regression_metrics(y_train, train_pred)
+                valid_metrics = regression_metrics(y_valid, valid_pred)
+                train_overall_pred = np.asarray(train_pred, dtype=float)
+                valid_overall_pred = np.asarray(valid_pred, dtype=float)
 
-        fold_output_dir = model_dir / f"fold_{fold}_trainer"
-        start = time.perf_counter()
-        transformer_result = train_transformer(
-            train_df=train_df,
-            valid_df=valid_df,
-            hparams=hparams,
-            output_dir=str(fold_output_dir),
-            text_col="text",
-            label_col="score",
-            model_name=args.model,
-            tokenizer_name=args.model,
-            max_length=256,
-            seed=args.seed,
-        )
-        train_time_seconds = float(time.perf_counter() - start)
-        train_pred = np.asarray(transformer_result["train_predictions"], dtype=float)
-        valid_pred = np.asarray(transformer_result["valid_predictions"], dtype=float)
+            gap_abs = abs(train_metrics["qwk"] - valid_metrics["qwk"])
+            warnings = []
+            if gap_abs > 0.10:
+                warnings.append("train_valid_qwk_gap_abs_gt_0.10")
 
-        train_metrics = regression_metrics(y_train, train_pred)
-        valid_metrics = regression_metrics(y_valid, valid_pred)
-        gap_abs = abs(train_metrics["qwk"] - valid_metrics["qwk"])
-        warnings = []
-        if gap_abs > 0.10:
-            warnings.append("train_valid_qwk_gap_abs_gt_0.10")
-
-        valid_predictions = labels.loc[valid_mask].copy()
-        valid_predictions.insert(0, "fold", fold)
-        valid_predictions.insert(0, "model_id", model_id)
-        valid_predictions["prediction"] = np.clip(valid_pred, SCORE_MIN, SCORE_MAX)
-        valid_predictions["prediction_rounded"] = rounded_score(
-            valid_predictions["prediction"].to_numpy(dtype=float)
-        )
-        valid_predictions["mlflow_run_id"] = ""
-        valid_predictions = valid_predictions[
-            [
+            valid_predictions = labels.loc[valid_mask].copy()
+            valid_predictions.insert(0, "fold", fold)
+            valid_predictions.insert(0, "model_id", model_id)
+            if phase3:
+                for idx, (target_col, pred_col, output_name) in enumerate(
+                    zip(PHASE3_TARGET_COLUMNS, PHASE3_PREDICTION_COLUMNS, PHASE3_OUTPUT_NAMES)
+                ):
+                    valid_predictions[pred_col] = np.clip(valid_pred[:, idx], 0.0, 3.0)
+                    valid_predictions[f"y_true_{output_name}"] = valid_predictions[target_col]
+                    valid_predictions[f"y_pred_{output_name}"] = valid_predictions[pred_col]
+                valid_predictions["y_true_overall_raw"] = valid_predictions["target_overall_raw"]
+                valid_predictions["y_pred_overall_raw"] = valid_overall_pred
+            valid_predictions["prediction"] = np.clip(valid_overall_pred, SCORE_MIN, SCORE_MAX)
+            valid_predictions["prediction_rounded"] = rounded_score(
+                valid_predictions["prediction"].to_numpy(dtype=float)
+            )
+            valid_predictions["mlflow_run_id"] = ""
+            prediction_columns = [
                 "model_id",
                 "fold",
                 "essay_id",
@@ -767,80 +950,136 @@ def train_transformer_model(
                 TARGET_NAME,
                 "prediction",
                 "prediction_rounded",
-                "essay_type",
-                "student_grade_group",
-                "score_band",
-                "mlflow_run_id",
             ]
-        ]
+            if phase3:
+                prediction_columns.extend(
+                    [
+                        *PHASE3_TARGET_COLUMNS,
+                        "target_overall_raw",
+                        *PHASE3_PREDICTION_COLUMNS,
+                        "y_true_exp",
+                        "y_pred_exp",
+                        "y_true_org",
+                        "y_pred_org",
+                        "y_true_cont",
+                        "y_pred_cont",
+                        "y_true_overall_raw",
+                        "y_pred_overall_raw",
+                    ]
+                )
+            prediction_columns.extend(
+                ["essay_type", "student_grade_group", "score_band", "mlflow_run_id"]
+            )
+            valid_predictions = valid_predictions[prediction_columns]
 
-        fold_predictions_path = model_dir / f"fold_{fold}_predictions.csv"
-        fold_metrics_path = model_dir / f"fold_{fold}_metrics.json"
-        fold_segment_path = model_dir / f"fold_{fold}_segment_metrics.csv"
-        fold_run_path = model_dir / f"M5_run_fold_{fold}.json"
-        valid_predictions.to_csv(fold_predictions_path, index=False)
-        segment_metrics(valid_predictions).to_csv(fold_segment_path, index=False)
+            fold_predictions_path = model_dir / f"fold_{fold}_predictions.csv"
+            fold_metrics_path = model_dir / f"fold_{fold}_metrics.json"
+            fold_segment_path = model_dir / f"fold_{fold}_segment_metrics.csv"
+            fold_run_path = model_dir / f"M5_run_fold_{fold}.json"
+            valid_predictions.to_csv(fold_predictions_path, index=False)
+            segment_metrics(valid_predictions).to_csv(fold_segment_path, index=False)
 
-        fold_metrics = {
-            "model_id": model_id,
-            "model_name": MODEL_SPECS[model_id]["model_name"],
-            "hf_model": args.model,
-            "fold": fold,
-            "train_n": int(train_mask.sum()),
-            "valid_n": int(valid_mask.sum()),
-            "feature_set": MODEL_SPECS[model_id]["feature_set"],
-            "assumption": MODEL_SPECS[model_id]["assumption"],
-            "hparams": hparams,
-            "train_time_seconds": train_time_seconds,
-            "train_metrics": train_metrics,
-            "valid_metrics": valid_metrics,
-            "train_valid_qwk_gap": train_metrics["qwk"] - valid_metrics["qwk"],
-            "train_valid_qwk_gap_abs": gap_abs,
-            "prediction_distribution": {
-                "train_mean": float(np.mean(train_pred)),
-                "train_std": float(np.std(train_pred)),
-                "valid_mean": float(np.mean(valid_pred)),
-                "valid_std": float(np.std(valid_pred)),
-                "valid_min": float(np.min(valid_pred)),
-                "valid_max": float(np.max(valid_pred)),
-            },
-            "model_path": transformer_result["model_path"],
-            "warnings": warnings,
-        }
-        write_json(fold_metrics_path, fold_metrics)
-
-        run_id = mlflow_log_common(
-            model_id=model_id,
-            fold=fold,
-            args=args,
-            config_hash=config_hash,
-            split_hash=split_hash,
-            feature_provenance_hash=feature_provenance_hash,
-            train_metrics=train_metrics,
-            valid_metrics=valid_metrics,
-            train_time_seconds=train_time_seconds,
-            feature_set=MODEL_SPECS[model_id]["feature_set"],
-            artifact_paths=[fold_predictions_path, fold_metrics_path, fold_segment_path],
-            estimator_extra_params={"hf_model": args.model, **hparams},
-        )
-        run_ids[str(fold)] = run_id
-        valid_predictions["mlflow_run_id"] = run_id
-        valid_predictions.to_csv(fold_predictions_path, index=False)
-        fold_metrics["mlflow_run_id"] = run_id
-        write_json(fold_metrics_path, fold_metrics)
-        write_json(
-            fold_run_path,
-            {
+            fold_metrics = {
                 "model_id": model_id,
+                "model_name": MODEL_SPECS[model_id]["model_name"],
+                "hf_model": args.model,
+                "phase": phase,
+                "task_type": transformer_result["task_type"],
                 "fold": fold,
-                "mlflow_run_id": run_id,
-                "metrics_path": str(fold_metrics_path),
-                "predictions_path": str(fold_predictions_path),
+                "train_n": int(train_mask.sum()),
+                "valid_n": int(valid_mask.sum()),
+                "feature_set": MODEL_SPECS[model_id]["feature_set"],
+                "assumption": MODEL_SPECS[model_id]["assumption"],
+                "hparams": hparams,
+                "train_time_seconds": train_time_seconds,
+                "train_metrics": train_metrics,
+                "valid_metrics": valid_metrics,
+                "train_valid_qwk_gap": train_metrics["qwk"] - valid_metrics["qwk"],
+                "train_valid_qwk_gap_abs": gap_abs,
+                "prediction_distribution": {
+                    "train_mean": float(np.mean(train_overall_pred)),
+                    "train_std": float(np.std(train_overall_pred)),
+                    "valid_mean": float(np.mean(valid_overall_pred)),
+                    "valid_std": float(np.std(valid_overall_pred)),
+                    "valid_min": float(np.min(valid_overall_pred)),
+                    "valid_max": float(np.max(valid_overall_pred)),
+                },
                 "model_path": transformer_result["model_path"],
-            },
-        )
-        all_valid_predictions.append(valid_predictions)
-        per_fold_metrics.append(fold_metrics)
+                "warnings": warnings,
+            }
+            if phase3:
+                fold_metrics.update(
+                    {
+                        "target_columns": list(PHASE3_TARGET_COLUMNS),
+                        "macro_weight_columns": list(PHASE3_WEIGHT_COLUMNS),
+                        "loss_formula": PHASE3_LOSS_FORMULA,
+                        "phase3_target_artifacts": phase3_artifacts,
+                        "train_per_target": transformer_result["train_per_target"],
+                        "valid_per_target": transformer_result["valid_per_target"],
+                    }
+                )
+            write_json(fold_metrics_path, fold_metrics)
+
+            estimator_extra = {
+                "hf_model": args.model,
+                "task_type": transformer_result["task_type"],
+                "num_labels": transformer_result["num_labels"],
+                **hparams,
+            }
+            if phase3:
+                estimator_extra.update(
+                    {
+                        "target_columns": ",".join(PHASE3_TARGET_COLUMNS),
+                        "macro_weight_columns": ",".join(PHASE3_WEIGHT_COLUMNS),
+                        "loss_formula": PHASE3_LOSS_FORMULA,
+                    }
+                )
+            run_id = mlflow_log_common(
+                model_id=model_id,
+                fold=fold,
+                args=args,
+                config_hash=config_hash,
+                split_hash=split_hash,
+                feature_provenance_hash=feature_provenance_hash,
+                train_metrics=train_metrics,
+                valid_metrics=valid_metrics,
+                train_time_seconds=train_time_seconds,
+                feature_set=MODEL_SPECS[model_id]["feature_set"],
+                artifact_paths=[fold_predictions_path, fold_metrics_path, fold_segment_path],
+                estimator_extra_params=estimator_extra,
+            )
+            run_ids[str(fold)] = run_id
+            valid_predictions["mlflow_run_id"] = run_id
+            valid_predictions.to_csv(fold_predictions_path, index=False)
+            fold_metrics["mlflow_run_id"] = run_id
+            write_json(fold_metrics_path, fold_metrics)
+            write_json(
+                fold_run_path,
+                {
+                    "model_id": model_id,
+                    "phase": phase,
+                    "task_type": transformer_result["task_type"],
+                    "fold": fold,
+                    "mlflow_run_id": run_id,
+                    "metrics_path": str(fold_metrics_path),
+                    "predictions_path": str(fold_predictions_path),
+                    "model_path": transformer_result["model_path"],
+                },
+            )
+            all_valid_predictions.append(valid_predictions)
+            per_fold_metrics.append(fold_metrics)
+            progress_update(
+                progress,
+                current_step=f"fold_{fold}_train_done",
+                current_step_idx=fold_index + 1,
+                last_checkpoint_path=str(transformer_result["model_path"] or fold_output_dir),
+            )
+            if progress is not None:
+                progress.record_metric(f"fold_{fold}_valid_qwk_overall_raw", valid_metrics["qwk"])
+    except Exception as exc:
+        if progress is not None:
+            progress.mark_fail(str(exc))
+        raise
 
     predictions = pd.concat(all_valid_predictions, ignore_index=True)
     predictions_path = model_dir / "predictions.csv"
@@ -862,7 +1101,12 @@ def train_transformer_model(
         "model_id": model_id,
         "model_name": MODEL_SPECS[model_id]["model_name"],
         "hf_model": args.model,
+        "phase": phase,
+        "task_type": "phase3_multitask" if phase3 else "scalar_regression",
         "target_name": TARGET_NAME,
+        "target_columns": list(PHASE3_TARGET_COLUMNS) if phase3 else None,
+        "macro_weight_columns": list(PHASE3_WEIGHT_COLUMNS) if phase3 else None,
+        "loss_formula": PHASE3_LOSS_FORMULA if phase3 else None,
         "seed": args.seed,
         "config_hash_algorithm": "sha256",
         "config_hash": config_hash,
@@ -897,9 +1141,13 @@ def train_transformer_model(
             f"m=json.load(open('{manifest_path}')); "
             f"p=pd.read_csv('{predictions_path}'); "
             f"assert len(m['mlflow_run_ids']) == m['fold_count']; "
-            f"assert len(p) == m['valid_prediction_count']\""
+            f"assert len(p) == m['valid_prediction_count']; "
+            f"assert m['task_type'] in ['phase3_multitask','scalar_regression']\""
         ),
     }
+    if progress is not None:
+        manifest["progress_json"] = str(args.progress_json)
+        progress.mark_done()
     write_json(manifest_path, manifest)
     return manifest
 

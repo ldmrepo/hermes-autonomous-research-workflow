@@ -69,6 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", choices=["M4", "M5"], required=True)
     parser.add_argument("--n-trials", type=int, required=True)
     parser.add_argument("--cycle-id", required=True, help="e.g. 'M1', 'M2'.")
+    parser.add_argument(
+        "--phase",
+        default="auto",
+        help="HPO phase. 'auto' treats feature dirs with Phase 3 target artifacts as phase 3.",
+    )
     parser.add_argument("--study-name", required=True)
     parser.add_argument("--storage", required=True, help="e.g. sqlite:///optuna.db")
     parser.add_argument("--mlflow-uri", required=True)
@@ -129,7 +134,7 @@ def run_with_mlflow_parent(
                 if feature_provenance_tag is not None:
                     mlflow.set_tag("feature_provenance", feature_provenance_tag)
                 # Also inherit cycle_id + kanban_task_id for trial-level audit
-                for inherit_key in ("cycle_id", "kanban_task_id"):
+                for inherit_key in ("cycle_id", "phase", "kanban_task_id"):
                     if inherit_key in parent_tags:
                         mlflow.set_tag(inherit_key, parent_tags[inherit_key])
                 value = raw_objective(trial)
@@ -230,6 +235,7 @@ def build_m5_objective_factory(
     hf_model: str,
     seed: int,
     output_root: Path,
+    phase: str = "auto",
 ) -> Callable[[], Callable[[optuna.Trial], float]]:
     """Returns a factory that builds an M5 KLUE-RoBERTa objective.
 
@@ -241,13 +247,20 @@ def build_m5_objective_factory(
 
     def factory() -> Callable[[optuna.Trial], float]:
         from pipelines.train import (
+            PHASE3_TARGET_COLUMNS,
+            PHASE3_WEIGHT_COLUMNS,
             TARGET_NAME,
             discover_folds,
+            load_phase3_transformer_fold,
             load_fold_data,
             load_model_text,
+            resolve_phase,
         )
         from pipelines.train_transformer import train_transformer
 
+        phase_args = argparse.Namespace(phase=phase, feature_dir=str(feature_dir))
+        resolved_phase = resolve_phase(phase_args)
+        phase3 = resolved_phase == "3"
         folds = discover_folds(feature_dir)
 
         def objective(trial: optuna.Trial) -> float:
@@ -262,19 +275,32 @@ def build_m5_objective_factory(
             }
             fold_maes: list[float] = []
             for fold in folds:
-                _, labels, _ = load_fold_data(
-                    fold=fold, feature_dir=feature_dir, label_dir=label_dir
-                )
-                labels["text"] = [
-                    load_model_text(label_dir, row.relative_path, row.essay_id)
-                    for row in labels.itertuples(index=False)
-                ]
-                train_df = labels.loc[labels["partition"] == "train", ["text", TARGET_NAME]].rename(
-                    columns={TARGET_NAME: "score"}
-                )
-                valid_df = labels.loc[labels["partition"] == "valid", ["text", TARGET_NAME]].rename(
-                    columns={TARGET_NAME: "score"}
-                )
+                if phase3:
+                    labels, _ = load_phase3_transformer_fold(
+                        fold=fold, feature_dir=feature_dir, label_dir=label_dir
+                    )
+                    train_mask = labels["partition"] == "train"
+                    valid_mask = labels["partition"] == "valid"
+                    train_df = labels.loc[
+                        train_mask, ["text", *PHASE3_TARGET_COLUMNS, *PHASE3_WEIGHT_COLUMNS]
+                    ].copy()
+                    valid_df = labels.loc[
+                        valid_mask, ["text", *PHASE3_TARGET_COLUMNS, *PHASE3_WEIGHT_COLUMNS]
+                    ].copy()
+                else:
+                    _, labels, _ = load_fold_data(
+                        fold=fold, feature_dir=feature_dir, label_dir=label_dir
+                    )
+                    labels["text"] = [
+                        load_model_text(label_dir, row.relative_path, row.essay_id)
+                        for row in labels.itertuples(index=False)
+                    ]
+                    train_df = labels.loc[
+                        labels["partition"] == "train", ["text", TARGET_NAME]
+                    ].rename(columns={TARGET_NAME: "score"})
+                    valid_df = labels.loc[
+                        labels["partition"] == "valid", ["text", TARGET_NAME]
+                    ].rename(columns={TARGET_NAME: "score"})
                 result = train_transformer(
                     train_df=train_df,
                     valid_df=valid_df,
@@ -285,6 +311,9 @@ def build_m5_objective_factory(
                     max_length=256,
                     text_col="text",
                     label_col="score",
+                    label_cols=PHASE3_TARGET_COLUMNS if phase3 else None,
+                    macro_weight_cols=PHASE3_WEIGHT_COLUMNS if phase3 else None,
+                    phase=resolved_phase if phase3 else None,
                     seed=seed,
                     save_model=False,
                 )
@@ -306,10 +335,14 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     label_dir = resolve_label_dir(Path(args.label_dir))
+    from pipelines.train import resolve_phase
+
+    phase = resolve_phase(args)
 
     feature_provenance_hash = compute_feature_provenance(Path(args.feature_dir))
     parent_tags = {
         "cycle_id": str(args.cycle_id),
+        "phase": phase,
         "kanban_task_id": args.kanban_task_id,
         "model_id": args.model,
         "study_name": args.study_name,
@@ -339,6 +372,7 @@ def main() -> int:
             hf_model=args.hf_model,
             seed=args.sampler_seed,
             output_root=output_dir / "trials",
+            phase=phase,
         )
         parent_params["search_space"] = (
             "learning_rate log[1e-5,5e-5], batch_size{8,16,32}, epochs[2,5], "
@@ -368,6 +402,7 @@ def main() -> int:
                 "best_params": result["best_params"],
                 "parent_run_id": result["parent_run_id"],
                 "cycle_id": args.cycle_id,
+                "phase": phase,
                 "kanban_task_id": args.kanban_task_id,
             },
             ensure_ascii=False,
