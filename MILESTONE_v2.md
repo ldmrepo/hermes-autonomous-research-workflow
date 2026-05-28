@@ -18,6 +18,7 @@ Hermes Multi-Agent Kanban Board로 한국어 K-12 에세이 자동채점 모델�
 5. **Skill library 5+ verified skill 누적** (Cycle M3 종료 시점)
 6. **PII gate 통과**: 외부 compute(vast.ai) 송신 전 `audit_pii --fail-on-hit` exit=0 (Hard Rule #13)
 7. **Acceptance**: PASS_CANDIDATE 또는 PASS_FINAL 도달 (ACCEPTANCE_CRITERIA.yaml mid 섹션)
+8. **Score-Band Fairness Gate 통과** (Hard Rule #14, 2026-05-28 신설): `worst_band_qwk >= macro_qwk × 0.7`. 본 데이터셋의 score 편중(high 90.5% / mid 9.5% / low 0.04%) 때문에 overall metric 단독 acceptance 금지. low band N<10이면 `SKIP_UNSTABLE` 마크 + qualitative risk 보고만으로 충족.
 
 ## Out of Scope (본 milestone 종결 후)
 
