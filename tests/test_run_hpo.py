@@ -14,9 +14,11 @@ import pytest
 from pipelines.run_hpo import (
     build_m4_objective_factory,
     build_m5_objective_factory,
+    compute_feature_provenance,
     enforce_min_trials,
     parse_args,
     run_with_mlflow_parent,
+    sha256_file,
 )
 
 
@@ -123,6 +125,25 @@ def _quadratic_objective_factory(trial_counter: dict[str, int]):
         return (x - 3.0) ** 2
 
     return objective
+
+
+class TestFeatureProvenanceTag:
+    """Hard Rule #3: HPO MLflow runs must carry feature_provenance tag (Medium #5)."""
+
+    def test_compute_returns_sha256_hex(self, tmp_path):
+        feature_dir = tmp_path / "features"
+        feature_dir.mkdir()
+        manifest = feature_dir / "feature_provenance_manifest.json"
+        manifest.write_text('{"label_side_feature_count": 0}', encoding="utf-8")
+        result = compute_feature_provenance(feature_dir)
+        assert len(result) == 64  # sha256 hex digest
+        assert result == sha256_file(manifest)
+
+    def test_compute_raises_when_manifest_missing(self, tmp_path):
+        feature_dir = tmp_path / "features"
+        feature_dir.mkdir()
+        with pytest.raises(FileNotFoundError, match="feature_provenance_manifest"):
+            compute_feature_provenance(feature_dir)
 
 
 class TestObjectiveFactoryImports:

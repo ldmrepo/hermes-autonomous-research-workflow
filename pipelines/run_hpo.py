@@ -15,6 +15,7 @@ Search spaces (Cycle M1 spec, task t_13e1eaaa body):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +26,30 @@ from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 
 MIN_TRIALS = 30  # Hard Rule #12
+
+
+def sha256_file(path: Path) -> str:
+    """SHA-256 of file contents (matches pipelines.train.sha256_file)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def compute_feature_provenance(feature_dir: Path) -> str:
+    """Hard Rule #3: every MLflow run logs feature_provenance tag.
+
+    Returns sha256 of {feature_dir}/feature_provenance_manifest.json (matches the
+    hash that train.py logs for final model runs).
+    """
+    manifest_path = feature_dir / "feature_provenance_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"feature_provenance_manifest.json not found under {feature_dir}; "
+            "run pipelines.build_features first."
+        )
+    return sha256_file(manifest_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,9 +108,18 @@ def run_with_mlflow_parent(
         mlflow.log_param("optuna_sampler", "TPESampler")
         mlflow.log_param("optuna_pruner", "MedianPruner")
 
+        feature_provenance_tag = parent_tags.get("feature_provenance")
+
         def wrapped_objective(trial: optuna.Trial) -> float:
             with mlflow.start_run(nested=True) as nested:
                 mlflow.set_tag("trial_number", str(trial.number))
+                # Hard Rule #3: nested trial run must inherit feature_provenance tag
+                if feature_provenance_tag is not None:
+                    mlflow.set_tag("feature_provenance", feature_provenance_tag)
+                # Also inherit cycle_id + kanban_task_id for trial-level audit
+                for inherit_key in ("cycle_id", "kanban_task_id"):
+                    if inherit_key in parent_tags:
+                        mlflow.set_tag(inherit_key, parent_tags[inherit_key])
                 value = raw_objective(trial)
                 mlflow.log_metric("objective_value", float(value))
                 for pname, pval in trial.params.items():
@@ -256,11 +290,13 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    feature_provenance_hash = compute_feature_provenance(Path(args.feature_dir))
     parent_tags = {
         "cycle_id": str(args.cycle_id),
         "kanban_task_id": args.kanban_task_id,
         "model_id": args.model,
         "study_name": args.study_name,
+        "feature_provenance": feature_provenance_hash,
     }
     parent_params = {
         "model": args.model,
